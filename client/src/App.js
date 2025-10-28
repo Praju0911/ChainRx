@@ -3,8 +3,12 @@ import { ethers } from 'ethers';
 // Import the ABI of your smart contract
 import MedChainABI from "./MedChain.json";
 
-// Your smart contract's deployed address from the previous step
-const contractAddress = "0x17171d50137Cf72678725d4223767c70a54A70c3";
+// ------------------------------------------------------------------
+// Your NEW, CORRECT contract address is now included
+// ------------------------------------------------------------------
+const contractAddress = "0x6A316c75aa7dFa8378761ce94793B977C97A0e99";
+// ------------------------------------------------------------------
+
 
 function App() {
   const [account, setAccount] = useState(null);
@@ -40,18 +44,20 @@ function App() {
     
     try {
       const provider = new ethers.BrowserProvider(window.ethereum);
-      // We only need a provider (read-only) to get records
       const contract = new ethers.Contract(contractAddress, MedChainABI.abi, provider);
       
-      // Call the 'getPatientRecordHashes' function from the smart contract
-      // We pass 'account' as the patient's address
-      const recordHashes = await contract.getPatientRecordHashes(account);
+      // ------------------------------------------------------------------
+      // THE FIX: Calling the new 'getMyRecords' function
+      // ------------------------------------------------------------------
+      const recordHashes = await contract.getMyRecords();
+      // ------------------------------------------------------------------
       
       setRecords(recordHashes);
       setStatus(recordHashes.length === 0 ? "No records found." : "Records fetched successfully.");
     } catch (error) {
       console.error("Error fetching records:", error);
-      setStatus("Error fetching records.");
+      // This error will happen if the ABI is wrong (see next step)
+      setStatus("Error fetching records. (Did you update the ABI?)");
     }
   };
 
@@ -92,25 +98,21 @@ function App() {
       // --- STEP 2: SAVE HASH TO BLOCKCHAIN ---
       if (window.ethereum) {
         const provider = new ethers.BrowserProvider(window.ethereum);
-        // We need a 'signer' to send a transaction (write)
         const signer = await provider.getSigner();
         const contract = new ethers.Contract(contractAddress, MedChainABI.abi, signer);
 
-        // This will trigger a MetaMask pop-up to confirm the transaction
         console.log(`Calling uploadRecord with hash: ${ipfsHash}`);
         const tx = await contract.uploadRecord(ipfsHash);
         
-        // Wait for the transaction to be mined
         await tx.wait();
 
         setStatus(`Success! Transaction confirmed. Hash saved.`);
         
-        // Clear the file input and refresh the records list
         setSelectedFile(null);
         if(document.getElementById('file-upload')) {
           document.getElementById('file-upload').value = null;
         }
-        await getRecords(); // Refresh the list to show the new record
+        await getRecords(); // Refresh the list
       }
     } catch (error) {
       console.error('Upload failed:', error);
@@ -120,7 +122,6 @@ function App() {
     }
   };
 
-  // This hook runs once when the 'account' state changes
   useEffect(() => {
     if (account) {
       getRecords();
