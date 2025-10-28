@@ -1,111 +1,146 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
+// Import the ABI of your smart contract
+import MedChainABI from "./MedChain.json";
 
-// We can remove the logo and default App.css
-// import logo from './logo.svg';
-// import './App.css';
+// Your smart contract's deployed address from the previous step
+const contractAddress = "0x17171d50137Cf72678725d4223767c70a54A70c3";
 
 function App() {
-  // State for the user's wallet address
   const [account, setAccount] = useState(null);
-  
-  // New state variables for the file upload
-  const [file, setFile] = useState(null);
-  const [uploadStatus, setUploadStatus] = useState("Idle");
-  const [ipfsHash, setIpfsHash] = useState("");
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [status, setStatus] = useState('');
+  const [records, setRecords] = useState([]); // To store the list of records
+  const [isLoading, setIsLoading] = useState(false);
 
-  /**
-   * Connects the user's MetaMask wallet.
-   */
+  // Helper function to shorten the wallet address
+  const getTruncatedAddress = (address) => {
+    if (!address) return "";
+    return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
+  };
+
+  // 1. Connects to MetaMask
   const connectWallet = async () => {
     if (window.ethereum) {
       try {
         const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
         setAccount(accounts[0]);
-        console.log("Wallet connected:", accounts[0]);
       } catch (error) {
         console.error("Error connecting wallet:", error);
       }
     } else {
-      console.error("Please install MetaMask to use this application.");
-      alert("Please install MetaMask to use this application.");
+      setStatus("Please install MetaMask to use this application.");
     }
   };
 
-  /**
-   * Updates state when a file is selected.
-   */
-  const handleFileChange = (e) => {
-    setFile(e.target.files[0]);
-    setUploadStatus("Idle");
-    setIpfsHash("");
+  // 2. Fetches the patient's records from the blockchain
+  const getRecords = async () => {
+    if (!account || !window.ethereum) return;
+    setStatus("Fetching your records...");
+    
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      // We only need a provider (read-only) to get records
+      const contract = new ethers.Contract(contractAddress, MedChainABI.abi, provider);
+      
+      // Call the 'getPatientRecordHashes' function from the smart contract
+      // We pass 'account' as the patient's address
+      const recordHashes = await contract.getPatientRecordHashes(account);
+      
+      setRecords(recordHashes);
+      setStatus(recordHashes.length === 0 ? "No records found." : "Records fetched successfully.");
+    } catch (error) {
+      console.error("Error fetching records:", error);
+      setStatus("Error fetching records.");
+    }
   };
 
-  /**
-   * Handles the file upload to our backend/IPFS.
-   */
-  const handleFileUpload = async () => {
-    if (!file) {
-      alert("Please select a file first.");
+  // 3. Handles file selection
+  const onFileChange = (event) => {
+    setSelectedFile(event.target.files[0]);
+    setStatus('');
+  };
+
+  // 4. Main function: Uploads file to IPFS, then saves hash to blockchain
+  const uploadFile = async () => {
+    if (!selectedFile) {
+      setStatus("Error: Please select a file first.");
       return;
     }
-
-    setUploadStatus("Uploading to IPFS via server...");
     
-    // Create a FormData object to send the file
+    setIsLoading(true);
+    setStatus('Step 1/2: Uploading file to IPFS...');
+
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append('file', selectedFile);
 
     try {
-      // Send the file to our backend server (which we will build)
-      const response = await fetch("http://localhost:3001/upload", {
-        method: "POST",
+      // --- STEP 1: UPLOAD TO IPFS (via our backend) ---
+      const ipfsResponse = await fetch('http://localhost:3001/upload', {
+        method: 'POST',
         body: formData,
       });
 
-      const data = await response.json();
+      if (!ipfsResponse.ok) {
+        throw new Error('Error uploading file to IPFS.');
+      }
 
-      if (response.ok) {
-        setUploadStatus(`Success! File on IPFS:`);
-        setIpfsHash(data.ipfsHash);
+      const ipfsData = await ipfsResponse.json();
+      const ipfsHash = ipfsData.ipfsHash;
+      setStatus(`Step 2/2: Saving hash ${ipfsHash} to the blockchain...`);
+
+      // --- STEP 2: SAVE HASH TO BLOCKCHAIN ---
+      if (window.ethereum) {
+        const provider = new ethers.BrowserProvider(window.ethereum);
+        // We need a 'signer' to send a transaction (write)
+        const signer = await provider.getSigner();
+        const contract = new ethers.Contract(contractAddress, MedChainABI.abi, signer);
+
+        // This will trigger a MetaMask pop-up to confirm the transaction
+        console.log(`Calling uploadRecord with hash: ${ipfsHash}`);
+        const tx = await contract.uploadRecord(ipfsHash);
         
-        // --- NEXT STEP WILL GO HERE ---
-        // We will add the code to call our smart contract here
-        // console.log("Next, call smart contract with hash:", data.ipfsHash);
-        // ------------------------------
+        // Wait for the transaction to be mined
+        await tx.wait();
 
-      } else {
-        throw new Error(data.message || "Upload failed");
+        setStatus(`Success! Transaction confirmed. Hash saved.`);
+        
+        // Clear the file input and refresh the records list
+        setSelectedFile(null);
+        if(document.getElementById('file-upload')) {
+          document.getElementById('file-upload').value = null;
+        }
+        await getRecords(); // Refresh the list to show the new record
       }
     } catch (error) {
-      console.error("Upload error:", error);
-      setUploadStatus(`Error: ${error.message}`);
+      console.error('Upload failed:', error);
+      setStatus(`Error: ${error.message || 'Upload failed.'}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
-
-  /**
-   * A helper function to truncate the wallet address for display
-   */
-  const truncateAddress = (address) => {
-    if (!address) return "";
-    return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
-  };
+  // This hook runs once when the 'account' state changes
+  useEffect(() => {
+    if (account) {
+      getRecords();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account]);
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center p-8 font-sans">
-      
-      <header className="w-full max-w-5xl flex justify-between items-center mb-12">
-        <h1 className="text-3xl font-bold text-green-400">MedChain</h1>
-        
+    <div className="min-h-screen bg-gray-900 text-white p-8 font-sans">
+      {/* Header */}
+      <header className="flex justify-between items-center mb-12">
+        <h1 className="text-4xl font-bold text-green-400">MedChain</h1>
         {account ? (
-          <div className="bg-gray-800 text-green-400 py-2 px-4 rounded-full">
-            Connected: {truncateAddress(account)}
+          <div className="bg-green-500 text-gray-900 font-medium py-2 px-4 rounded-full">
+            Connected: {getTruncatedAddress(account)}
           </div>
         ) : (
           <button
             onClick={connectWallet}
-            className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-full transition duration-200"
+            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full transition duration-300"
           >
             Connect Wallet
           </button>
@@ -113,64 +148,82 @@ function App() {
       </header>
 
       {/* Main Content Area */}
-      <main className="w-full max-w-5xl flex-grow">
-        
-        {/* --- PATIENT DASHBOARD (Visible only if connected) --- */}
-        {account ? (
-          <div className="bg-gray-800 rounded-lg shadow-lg p-6">
-            <h2 className="text-2xl font-semibold mb-4">Patient Dashboard</h2>
-            <p className="text-gray-400 mb-6">Upload a new medical record to IPFS and the blockchain.</p>
-
-            {/* File Input Form */}
-            <div className="space-y-4">
+      {account && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          
+          {/* Column 1: Patient Dashboard for Uploading */}
+          <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+            <h2 className="text-2xl font-semibold mb-4 text-green-300">Patient Dashboard</h2>
+            <p className="mb-4 text-gray-300">Upload a new medical record to IPFS and the blockchain.</p>
+            
+            <div className="mb-4">
               <input
+                id="file-upload"
                 type="file"
-                onChange={handleFileChange}
+                onChange={onFileChange}
                 className="block w-full text-sm text-gray-400
                   file:mr-4 file:py-2 file:px-4
                   file:rounded-full file:border-0
                   file:text-sm file:font-semibold
-                  file:bg-green-100 file:text-green-700
-                  hover:file:bg-green-200"
+                  file:bg-blue-600 file:text-white
+                  hover:file:bg-blue-700 cursor-pointer"
               />
-              
-              <button
-                onClick={handleFileUpload}
-                disabled={!file || uploadStatus === "Uploading..."}
-                className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-full transition duration-200 disabled:bg-gray-500 disabled:cursor-not-allowed"
-              >
-                {uploadStatus.startsWith("Uploading") ? "Uploading..." : "Upload File"}
-              </button>
             </div>
+            
+            <button
+              onClick={uploadFile}
+              disabled={isLoading || !selectedFile}
+              className={`w-full font-bold py-3 px-4 rounded-full transition duration-300 ${
+                isLoading || !selectedFile
+                  ? 'bg-gray-600 cursor-not-allowed'
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
+            >
+              {isLoading ? (
+                <div className="flex justify-center items-center">
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Processing...
+                </div>
+              ) : 'Upload & Save to Blockchain'}
+            </button>
+            
+            {status && <p className="mt-4 text-sm text-gray-400 break-words">{status}</p>}
+          </div>
 
-            {/* Status Message Area */}
-            {uploadStatus !== "Idle" && (
-              <div className="mt-6 p-4 bg-gray-700 rounded-md">
-                <p className="text-sm font-medium">{uploadStatus}</p>
-                {ipfsHash && (
-                  <a 
-                    href={`https://gateway.pinata.cloud/ipfs/${ipfsHash}`} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="text-xs text-green-400 break-all hover:underline"
-                  >
-                    Hash: {ipfsHash}
-                  </a>
-                )}
-              </div>
-            )}
+          {/* Column 2: Displaying Records */}
+          <div className="bg-gray-800 p-6 rounded-lg shadow-xl">
+            <h2 className="text-2xl font-semibold mb-4 text-green-300">My Records</h2>
+            <div className="h-64 overflow-y-auto space-y-2">
+              {records.length > 0 ? (
+                records.map((hash, index) => (
+                  <div key={index} className="bg-gray-700 p-3 rounded text-xs text-gray-200 font-mono break-all">
+                    <a
+                      href={`https://gateway.pinata.cloud/ipfs/${hash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline"
+                    >
+                      {index + 1}: {hash}
+                    </a>
+                  </div>
+                ))
+              ) : (
+                <p className="text-gray-400">{status === "Fetching your records..." ? "Loading..." : "No records found."}</p>
+              )}
+            </div>
           </div>
-        ) : (
-          <div>
-            <h2 className="text-2xl font-semibold mb-4">Welcome to Your Secure Health Portal</h2>
-            <p className="text-gray-400">
-              Connect your wallet to get started. Once connected, you will be able to
-              upload your medical records securely to the blockchain.
-            </p>
-          </div>
-        )}
-        
-      </main>
+
+        </div>
+      )}
+
+      {!account && (
+        <div className="text-center mt-20">
+          <h2 className="text-3xl font-semibold text-gray-400">Please connect your wallet to begin.</h2>
+        </div>
+      )}
     </div>
   );
 }
